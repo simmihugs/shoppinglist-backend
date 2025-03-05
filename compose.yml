@@ -1,0 +1,14 @@
+services:
+  backend:
+    build: .
+    image: v2202501249718308038.megasrv.de:5000/my-shoppinglist:0.0.1
+    ports:
+      - "8080:8080"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8080"
+    volumes:
+      - shopping_list_data:/app/shopping_list.db
+
+volumes:
+  shopping_list_data:
