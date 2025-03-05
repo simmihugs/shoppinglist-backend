@@ -1,6 +1,7 @@
 # Simple rust backend for a shoppping list app
 
 ## How to run
+
 ```shell
-RUST_LOG=debug cargo run 
+HOST=192.168.178.22 PORT=8080 cargo run
 ```

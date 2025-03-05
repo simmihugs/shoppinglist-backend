@@ -1,8 +1,9 @@
 use actix_web::{App, HttpResponse, HttpServer, Responder, web};
 use env_logger;
 use log::{error, info};
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::sync::Mutex;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -36,17 +37,11 @@ async fn get_shopping_list(data: web::Data<AppState>) -> impl Responder {
 
     let items_result: Result<Vec<ShoppingItem>, rusqlite::Error> = stmt
         .query_map([], |row| {
-            let is_shopped_str: String = row.get(2)?;
-            let is_shopped = match is_shopped_str.to_lowercase().as_str() {
-                "true" | "1" => true,
-                "false" | "0" => false,
-                _ => false,
-            };
-
+            let is_shopped_int: i32 = row.get(2)?;
             Ok(ShoppingItem {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                is_shopped,
+                is_shopped: is_shopped_int != 0,
             })
         })
         .and_then(|iter| iter.collect());
@@ -67,7 +62,7 @@ async fn add_item(item: web::Json<ShoppingItem>, data: web::Data<AppState>) -> i
     let conn = data.db.lock().unwrap();
     let result = conn.execute(
         "INSERT INTO shopping_items (name, is_shopped) VALUES (?1, ?2)",
-        &[&item.name, &item.is_shopped.to_string()],
+        params![item.name, item.is_shopped],
     );
 
     match result {
@@ -79,7 +74,7 @@ async fn add_item(item: web::Json<ShoppingItem>, data: web::Data<AppState>) -> i
 async fn update_item_status(item_id: web::Path<i32>, data: web::Data<AppState>) -> impl Responder {
     let conn = data.db.lock().unwrap();
     let result = conn.execute(
-        "UPDATE shopping_items SET is_shopped = NOT is_shopped WHERE id = ?1",
+        "UPDATE shopping_items SET is_shopped = 1 - is_shopped WHERE id = ?1",
         [item_id.into_inner()],
     );
 
@@ -147,8 +142,11 @@ async fn main() -> std::io::Result<()> {
         db: Mutex::new(conn),
     });
 
-    let host = "192.168.178.22";
-    let port = 8080;
+    let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let port = env::var("PORT")
+        .unwrap_or_else(|_| "8080".to_string())
+        .parse()
+        .unwrap();
 
     println!("Server running at http://{}:{}", host, port);
 
