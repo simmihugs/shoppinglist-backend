@@ -1,5 +1,4 @@
 use actix_web::{App, HttpResponse, HttpServer, Responder, web};
-//use rusqlite::{Connection, Result as SqliteResult};
 use env_logger;
 use log::{error, info};
 use rusqlite::Connection;
@@ -11,7 +10,6 @@ struct ShoppingItem {
     id: Option<i32>,
     name: String,
     is_shopped: bool,
-    order_index: i32,
 }
 
 struct AppState {
@@ -27,9 +25,8 @@ async fn get_shopping_list(data: web::Data<AppState>) -> impl Responder {
         }
     };
 
-    let mut stmt = match conn.prepare(
-        "SELECT id, name, is_shopped, order_index FROM shopping_items ORDER BY order_index",
-    ) {
+    let mut stmt = match conn.prepare("SELECT id, name, is_shopped FROM shopping_items ORDER BY id")
+    {
         Ok(stmt) => stmt,
         Err(e) => {
             error!("Failed to prepare SQL statement: {:?}", e);
@@ -40,20 +37,16 @@ async fn get_shopping_list(data: web::Data<AppState>) -> impl Responder {
     let items_result: Result<Vec<ShoppingItem>, rusqlite::Error> = stmt
         .query_map([], |row| {
             let is_shopped_str: String = row.get(2)?;
-
             let is_shopped = match is_shopped_str.to_lowercase().as_str() {
                 "true" | "1" => true,
                 "false" | "0" => false,
                 _ => false,
             };
 
-            let order_index: i32 = row.get(3)?;
-
             Ok(ShoppingItem {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 is_shopped,
-                order_index,
             })
         })
         .and_then(|iter| iter.collect());
@@ -73,12 +66,8 @@ async fn get_shopping_list(data: web::Data<AppState>) -> impl Responder {
 async fn add_item(item: web::Json<ShoppingItem>, data: web::Data<AppState>) -> impl Responder {
     let conn = data.db.lock().unwrap();
     let result = conn.execute(
-        "INSERT INTO shopping_items (name, is_shopped, order_index) VALUES (?1, ?2, ?3)",
-        &[
-            &item.name,
-            &item.is_shopped.to_string(),
-            &item.order_index.to_string(),
-        ],
+        "INSERT INTO shopping_items (name, is_shopped) VALUES (?1, ?2)",
+        &[&item.name, &item.is_shopped.to_string()],
     );
 
     match result {
@@ -100,20 +89,44 @@ async fn update_item_status(item_id: web::Path<i32>, data: web::Data<AppState>) 
     }
 }
 
-async fn update_item_order(
-    item: web::Json<ShoppingItem>,
-    data: web::Data<AppState>,
-) -> impl Responder {
-    let conn = data.db.lock().unwrap();
-    let result = conn.execute(
-        "UPDATE shopping_items SET order_index = ?1 WHERE id = ?2",
-        &[&item.order_index, &item.id.unwrap()],
-    );
+async fn swap_items(items: web::Json<(i32, i32)>, data: web::Data<AppState>) -> impl Responder {
+    let (id1, id2) = items.into_inner(); // Extract the tuple from web::Json
 
-    match result {
-        Ok(_) => HttpResponse::Ok().finish(),
-        Err(_) => HttpResponse::InternalServerError().finish(),
+    let mut conn = data.db.lock().unwrap();
+    let transaction = conn.transaction().unwrap();
+
+    // Get the current positions of the items
+    let ids: Vec<i32> = {
+        let mut stmt = transaction
+            .prepare("SELECT id FROM shopping_items WHERE id IN (?1, ?2) ORDER BY id")
+            .unwrap();
+        let rows = stmt.query_map(&[&id1, &id2], |row| row.get(0)).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    };
+
+    if ids.len() != 2 {
+        return HttpResponse::BadRequest().finish();
     }
+
+    let (id1, id2) = (ids[0], ids[1]);
+
+    // Swap the positions
+    transaction
+        .execute("UPDATE shopping_items SET id = -1 WHERE id = ?1", &[&id1])
+        .unwrap();
+    transaction
+        .execute(
+            "UPDATE shopping_items SET id = ?1 WHERE id = ?2",
+            &[&id1, &id2],
+        )
+        .unwrap();
+    transaction
+        .execute("UPDATE shopping_items SET id = ?1 WHERE id = -1", &[&id2])
+        .unwrap();
+
+    transaction.commit().unwrap();
+
+    HttpResponse::Ok().finish()
 }
 
 #[actix_web::main]
@@ -124,8 +137,7 @@ async fn main() -> std::io::Result<()> {
         "CREATE TABLE IF NOT EXISTS shopping_items (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
-            is_shopped BOOLEAN NOT NULL,
-            order_index INTEGER NOT NULL
+            is_shopped BOOLEAN NOT NULL      
         )",
         [],
     )
@@ -146,7 +158,7 @@ async fn main() -> std::io::Result<()> {
             .route("/items", web::get().to(get_shopping_list))
             .route("/items", web::post().to(add_item))
             .route("/items/{id}/toggle", web::put().to(update_item_status))
-            .route("/items/reorder", web::put().to(update_item_order))
+            .route("/items/swap", web::put().to(swap_items))
     })
     .bind((host, port))?
     .run()
